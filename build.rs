@@ -195,8 +195,29 @@ fn switch(configure: &mut Command, feature: &str, name: &str) {
 fn get_ffmpeg_target_os() -> String {
     let cargo_target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     match cargo_target_os.as_str() {
-        "ios" => "darwin".to_string(),
+        "ios" | "tvos" | "macos" => "darwin".to_string(),
+        "windows" => {
+            if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+                "mingw32".to_string()
+            } else {
+                "win32".to_string()
+            }
+        },
+        "android" => "android".to_string(),
+        "emscripten" => "emscripten".to_string(),
         _ => cargo_target_os,
+    }
+}
+
+fn get_ffmpeg_target_arch() -> String {
+    let cargo_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
+    match cargo_arch.as_str() {
+        "x86_64" => "x86_64".to_string(),
+        "x86" | "i686" => "x86".to_string(),
+        // FFmpeg's configure historically distinguishes arm64 (aarch64) and arm
+        "aarch64" => "arm64".to_string(),
+        "arm" => "arm".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -311,7 +332,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
 
         configure.arg(format!(
             "--arch={}",
-            env::var("CARGO_CFG_TARGET_ARCH").unwrap()
+            get_ffmpeg_target_arch()
         ));
         configure.arg(format!("--target-os={}", get_ffmpeg_target_os()));
 
