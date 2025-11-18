@@ -391,7 +391,8 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     } else {
         // tune the compiler for the host architecture; skip flags for MSVC
         let target_triple = env::var("TARGET").unwrap_or_default();
-        if !target_triple.contains("msvc") {
+        if !target_triple.to_lowercase().contains("msvc") {
+            println!("cargo:warning=Adding -march=native and -mtune=native for {}", target_triple);
             // Only attempt GCC/Clang flags for non-MSVC compilers
             let cc_local = cc::Build::new();
             let mut march_flags: Vec<&str> = Vec::new();
