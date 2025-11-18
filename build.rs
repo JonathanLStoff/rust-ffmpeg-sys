@@ -389,17 +389,21 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             }
         }
     } else {
-        // tune the compiler for the host architecture if the compiler accepts the flags
-        let cc_local = cc::Build::new();
-        let mut march_flags: Vec<&str> = Vec::new();
-        if cc_local.is_flag_supported("-march=native").unwrap_or(false) {
-            march_flags.push("-march=native");
-        }
-        if cc_local.is_flag_supported("-mtune=native").unwrap_or(false) {
-            march_flags.push("-mtune=native");
-        }
-        if !march_flags.is_empty() {
-            push_arg(&mut configure, &mut configure_args, format!("--extra-cflags={}", march_flags.join(" ")));
+        // tune the compiler for the host architecture; skip flags for MSVC
+        let target_triple = env::var("TARGET").unwrap_or_default();
+        if !target_triple.contains("msvc") {
+            // Only attempt GCC/Clang flags for non-MSVC compilers
+            let cc_local = cc::Build::new();
+            let mut march_flags: Vec<&str> = Vec::new();
+            if cc_local.is_flag_supported("-march=native").unwrap_or(false) {
+                march_flags.push("-march=native");
+            }
+            if cc_local.is_flag_supported("-mtune=native").unwrap_or(false) {
+                march_flags.push("-mtune=native");
+            }
+            if !march_flags.is_empty() {
+                push_arg(&mut configure, &mut configure_args, format!("--extra-cflags={}", march_flags.join(" ")));
+            }
         }
     }
 
