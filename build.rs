@@ -7,6 +7,7 @@ use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str;
@@ -183,13 +184,17 @@ fn fetch() -> io::Result<()> {
     }
 }
 
-fn switch(configure: &mut Command, feature: &str, name: &str) {
+fn switch(configure: &mut Command, feature: &str, name: &str, configure_args: Option<&mut Vec<String>>) {
     let arg = if env::var("CARGO_FEATURE_".to_string() + feature).is_ok() {
         "--enable-"
     } else {
         "--disable-"
     };
-    configure.arg(arg.to_string() + name);
+    let full = arg.to_string() + name;
+    if let Some(args) = configure_args {
+        args.push(full.clone());
+    }
+    configure.arg(full);
 }
 
 fn get_ffmpeg_target_os() -> String {
@@ -306,6 +311,8 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     // Command's path is not relative to command's current_dir
     let configure_path = source_dir.join("configure");
     assert!(configure_path.exists());
+    // Convert configure path to owned string so we can record and pass it without moving the PathBuf
+    let configure_path_arg = configure_path.to_string_lossy().to_string();
     let mut configure = if cfg!(target_os = "windows") {
         if Command::new("sh")
             .arg("-c")
@@ -318,24 +325,41 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             ));
         }
 
-        let mut configure = Command::new("sh");
-        configure.arg(configure_path);
+    let mut configure = Command::new("sh");
+    // enable shell trace
+    configure.arg("-x");
+    configure.arg(configure_path_arg.clone());
         if cfg!(target_env = "msvc") {
             configure.arg("--toolchain=msvc");
         }
 
         configure
     } else {
-        Command::new(&configure_path)
+        // Use shell with -x to show expanded commands and make configure more verbose in logs
+        let mut sh = Command::new("sh");
+        sh.arg("-x");
+        sh.arg(configure_path_arg.clone());
+        sh
     };
 
     configure.current_dir(&source_dir);
-    configure.arg(format!("--prefix={}", search().to_string_lossy()));
+    // Track configure args for logging
+    let mut configure_args: Vec<String> = Vec::new();
+    fn push_arg(c: &mut Command, configure_args: &mut Vec<String>, s: String) {
+        configure_args.push(s.clone());
+        c.arg(s);
+    }
+    push_arg(&mut configure, &mut configure_args, format!("--prefix={}", search().to_string_lossy()));
+    // Record arguments that were previously added before we had the push_arg helper
+    configure_args.push(configure_path_arg.clone());
+    if cfg!(target_env = "msvc") {
+        configure_args.push("--toolchain=msvc".to_string());
+    }
 
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
     if target != host {
-        configure.arg("--enable-cross-compile");
+    push_arg(&mut configure, &mut configure_args, "--enable-cross-compile".to_string());
 
         // Rust targets are subtly different than naming scheme for compiler prefixes.
         // The cc crate has the messy logic of guessing a working prefix,
@@ -345,15 +369,12 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         // Apple-clang needs this, -arch is not enough.
         let target_flag = format!("--target={target}");
         if cc.is_flag_supported(&target_flag).unwrap_or(false) {
-            configure.arg(format!("--extra-cflags={target_flag}"));
-            configure.arg(format!("--extra-ldflags={target_flag}"));
+            push_arg(&mut configure, &mut configure_args, format!("--extra-cflags={target_flag}"));
+            push_arg(&mut configure, &mut configure_args, format!("--extra-ldflags={target_flag}"));
         }
 
-        configure.arg(format!(
-            "--arch={}",
-            get_ffmpeg_target_arch()
-        ));
-        configure.arg(format!("--target-os={}", get_ffmpeg_target_os()));
+    push_arg(&mut configure, &mut configure_args, format!("--arch={}", get_ffmpeg_target_arch()));
+    push_arg(&mut configure, &mut configure_args, format!("--target-os={}", get_ffmpeg_target_os()));
 
         // cross-prefix won't work for android because they use different compiler for every
         // platform version, so we provide direct compiler paths manually instead
@@ -364,12 +385,12 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             if let Some(suffix_pos) = compiler.rfind('-') {
                 let prefix = compiler[0..suffix_pos].trim_end_matches("-wr"); // "wr-c++" compiler
 
-                configure.arg(format!("--cross-prefix={prefix}-"));
+                push_arg(&mut configure, &mut configure_args, format!("--cross-prefix={prefix}-"));
             }
         }
     } else {
         // tune the compiler for the host arhitecture
-        configure.arg("--extra-cflags=-march=native -mtune=native");
+    push_arg(&mut configure, &mut configure_args, "--extra-cflags=-march=native -mtune=native".to_string());
     }
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
@@ -389,7 +410,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     // for macos the easiest way is to run xcrun, for other platform we support $SYSROOT var
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
         let sysroot = sysroot.expect("The sysroot is required for ios cross compilation, make sure to have available xcode or provide the $SYSROOT env var");
-        configure.arg(format!("--sysroot={sysroot}"));
+    push_arg(&mut configure, &mut configure_args, format!("--sysroot={sysroot}"));
 
         let cc = Command::new("xcrun")
             .args(["--sdk", "iphoneos", "-f", "clang"])
@@ -397,7 +418,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             .expect("failed to run xcrun")
             .stdout;
 
-        configure.arg(format!(
+        push_arg(&mut configure, &mut configure_args, format!(
             "--cc={}",
             str::from_utf8(&cc)
                 .expect("Failed to parse xcrun output")
@@ -413,10 +434,10 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         if !android_cc_path.exists() {
             panic!("Android CC path does not exists: {}", android_cc_raw_path);
         }
-        configure.arg(format!("--cc={android_cc_raw_path}"));
+    push_arg(&mut configure, &mut configure_args, format!("--cc={android_cc_raw_path}"));
 
         for tool in ["nm", "strip"] {
-            configure.arg(format!(
+            push_arg(&mut configure, &mut configure_args, format!(
                 "--{tool}={}",
                 android_cc_path
                     .join("..")
@@ -428,8 +449,8 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         }
 
         if let Ok(android_target_flags) = env::var(format!("CFLAGS_{target}")).as_deref() {
-            configure.arg(format!("--extra-cflags={android_target_flags}"));
-            configure.arg(format!("--extra-ldflags={android_target_flags}"));
+            push_arg(&mut configure, &mut configure_args, format!("--extra-cflags={android_target_flags}"));
+            push_arg(&mut configure, &mut configure_args, format!("--extra-ldflags={android_target_flags}"));
         }
 
         if matches!(
@@ -437,52 +458,52 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             Ok("x86_64") | Ok("x86")
         ) {
             // x86 asm contains position dependent code (relocations)
-            configure.arg("--disable-asm");
+            push_arg(&mut configure, &mut configure_args, "--disable-asm".to_string());
         }
 
         // https://github.com/Javernaut/ffmpeg-android-maker/blob/master/scripts/ffmpeg/build.sh#L30
         // configure.arg(--extra-ldflags=-WL,-z,max-page-size=16384");
         // required for android
-        configure.arg("--extra-cflags=-fPIC");
+    push_arg(&mut configure, &mut configure_args, "--extra-cflags=-fPIC".to_string());
     }
 
     // control debug build
     if env::var("DEBUG").is_ok() {
-        configure.arg("--enable-debug");
-        configure.arg("--disable-stripping");
+    push_arg(&mut configure, &mut configure_args, "--enable-debug".to_string());
+    push_arg(&mut configure, &mut configure_args, "--disable-stripping".to_string());
     } else {
-        configure.arg("--disable-debug");
-        configure.arg("--enable-stripping");
-        configure.arg("--extra-cflags=-03 -ffast-math -funroll-loops");
+    push_arg(&mut configure, &mut configure_args, "--disable-debug".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-stripping".to_string());
+    push_arg(&mut configure, &mut configure_args, "--extra-cflags=-03 -ffast-math -funroll-loops".to_string());
         #[cfg(not(target_os = "windows"))]
-        configure.arg("--extra-ldflags=-flto");
+    push_arg(&mut configure, &mut configure_args, "--extra-ldflags=-flto".to_string());
     }
 
     // make it static
-    configure.arg("--enable-static");
-    configure.arg("--disable-shared");
+    push_arg(&mut configure, &mut configure_args, "--enable-static".to_string());
+    push_arg(&mut configure, &mut configure_args, "--disable-shared".to_string());
     // windows includes threading in the standard library
     #[cfg(not(target_env = "msvc"))]
     {
-        configure.arg("--enable-pthreads");
+    push_arg(&mut configure, &mut configure_args, "--enable-pthreads".to_string());
     }
 
     // position independent code
-    configure.arg("--enable-pic");
+    push_arg(&mut configure, &mut configure_args, "--enable-pic".to_string());
 
     // stop autodetected libraries enabling themselves, causing linking errors
-    configure.arg("--disable-autodetect");
+    push_arg(&mut configure, &mut configure_args, "--disable-autodetect".to_string());
 
     // do not build programs since we don't need them
-    configure.arg("--disable-programs");
+    push_arg(&mut configure, &mut configure_args, "--disable-programs".to_string());
 
     // do not generate documentation
-    configure.arg("--disable-doc");
+    push_arg(&mut configure, &mut configure_args, "--disable-doc".to_string());
 
     macro_rules! enable {
         ($conf:expr, $feat:expr, $name:expr) => {
             if env::var(concat!("CARGO_FEATURE_", $feat)).is_ok() {
-                $conf.arg(concat!("--enable-", $name));
+                push_arg(&mut $conf, &mut configure_args, concat!("--enable-", $name).to_string());
             }
         };
     }
@@ -496,13 +517,13 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     // }
 
     // the binary using ffmpeg-sys must comply with GPL
-    switch(&mut configure, "BUILD_LICENSE_GPL", "gpl");
+    switch(&mut configure, "BUILD_LICENSE_GPL", "gpl", Some(&mut configure_args));
 
     // the binary using ffmpeg-sys must comply with (L)GPLv3
-    switch(&mut configure, "BUILD_LICENSE_VERSION3", "version3");
+    switch(&mut configure, "BUILD_LICENSE_VERSION3", "version3", Some(&mut configure_args));
 
     // the binary using ffmpeg-sys cannot be redistributed
-    switch(&mut configure, "BUILD_LICENSE_NONFREE", "nonfree");
+    switch(&mut configure, "BUILD_LICENSE_NONFREE", "nonfree", Some(&mut configure_args));
 
     let ffmpeg_major_version: u32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
 
@@ -513,7 +534,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         .filter(|lib| !(lib.name == "avresample" && ffmpeg_major_version >= 5))
         .filter(|lib| !(lib.name == "postproc" && ffmpeg_major_version >= 8))
     {
-        switch(&mut configure, &lib.name.to_uppercase(), lib.name);
+    switch(&mut configure, &lib.name.to_uppercase(), lib.name, Some(&mut configure_args));
     }
 
     // configure external SSL libraries
@@ -579,14 +600,14 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     if env::var("CARGO_FEATURE_BUILD_VIDEOTOOLBOX").is_ok()
         && matches!(target_os.as_str(), "ios" | "macos")
     {
-        configure.arg("--enable-videotoolbox");
+    push_arg(&mut configure, &mut configure_args, "--enable-videotoolbox".to_string());
 
         if target != host && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
-            configure.arg("--extra-cflags=-mios-version-min=11.0");
+            push_arg(&mut configure, &mut configure_args, "--extra-cflags=-mios-version-min=11.0".to_string());
         }
 
         if target != host && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-            configure.arg("--extra-cflags=-mmacosx-version-min=10.11");
+            push_arg(&mut configure, &mut configure_args, "--extra-cflags=-mmacosx-version-min=10.11".to_string());
         }
     }
 
@@ -594,36 +615,36 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     if env::var("CARGO_FEATURE_BUILD_AUDIOTOOLBOX").is_ok()
         && matches!(target_os.as_str(), "ios" | "macos")
     {
-        configure.arg("--enable-audiotoolbox");
-        configure.arg("--extra-cflags=-mios-version-min=11.0");
+    push_arg(&mut configure, &mut configure_args, "--enable-audiotoolbox".to_string());
+    push_arg(&mut configure, &mut configure_args, "--extra-cflags=-mios-version-min=11.0".to_string());
     }
 
     // Linux video acceleration API (VAAPI)
     if env::var("CARGO_FEATURE_BUILD_VAAPI").is_ok() && matches!(target_os.as_str(), "linux") {
-        configure.arg("--enable-vaapi");
+    push_arg(&mut configure, &mut configure_args, "--enable-vaapi".to_string());
     }
 
     if env::var("CARGO_FEATURE_BUILD_LIB_D3D11VA").is_ok()
         && matches!(target_os.as_str(), "windows")
     {
-        configure.arg("--enable-d3d11va");
+    push_arg(&mut configure, &mut configure_args, "--enable-d3d11va".to_string());
     }
 
     // DirectX Video Acceleration 2 (Windows only)
     if env::var("CARGO_FEATURE_BUILD_LIB_DXVA2").is_ok() && matches!(target_os.as_str(), "windows")
     {
-        configure.arg("--enable-dxva2");
+    push_arg(&mut configure, &mut configure_args, "--enable-dxva2".to_string());
     }
 
     // NVIDIA NVENC/NVDEC acceleration (Linux and Windows)
     if env::var("CARGO_FEATURE_BUILD_NVIDIA").is_ok()
         && matches!(target_os.as_str(), "linux" | "windows")
     {
-        configure.arg("--enable-libnpp");
-        configure.arg("--enable-cuda-nvcc");
-        configure.arg("--enable-cuvid");
-        configure.arg("--enable-nvenc");
-        configure.arg("--enable-cuda-llvm");
+    push_arg(&mut configure, &mut configure_args, "--enable-libnpp".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-cuda-nvcc".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-cuvid".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-nvenc".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-cuda-llvm".to_string());
 
         let cuda_path = env::var("CUDA_PATH").unwrap_or(if target_os == "linux" {
             "/usr/local/cuda".to_string()
@@ -636,7 +657,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         // Additional configuration may be needed for CUDA toolkit path
         // This could be provided as an environment variable
         if let Ok(cuda_path) = env::var("CUDA_PATH") {
-            configure.arg(format!("--cuda-path={cuda_path}"));
+            push_arg(&mut configure, &mut configure_args, format!("--cuda-path={cuda_path}"));
         }
     }
 
@@ -644,20 +665,20 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     if env::var("CARGO_FEATURE_BUILD_LIB_LIBMFX").is_ok()
         && matches!(target_os.as_str(), "linux" | "windows")
     {
-        configure.arg("--enable-libmfx");
+    push_arg(&mut configure, &mut configure_args, "--enable-libmfx".to_string());
     }
 
     // Android MediaCodec (Android only)
     if env::var("CARGO_FEATURE_BUILD_MEDIACODEC").is_ok() && target_os == "android" {
-        configure.arg("--enable-mediacodec");
-        configure.arg("--enable-jni");
+    push_arg(&mut configure, &mut configure_args, "--enable-mediacodec".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-jni".to_string());
 
         // Add common MediaCodec decoders
-        configure.arg("--enable-decoder=h264_mediacodec");
-        configure.arg("--enable-decoder=hevc_mediacodec");
-        configure.arg("--enable-decoder=vp8_mediacodec");
-        configure.arg("--enable-decoder=vp9_mediacodec");
-        configure.arg("--enable-decoder=av1_mediacodec");
+    push_arg(&mut configure, &mut configure_args, "--enable-decoder=h264_mediacodec".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-decoder=hevc_mediacodec".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-decoder=vp8_mediacodec".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-decoder=vp9_mediacodec".to_string());
+    push_arg(&mut configure, &mut configure_args, "--enable-decoder=av1_mediacodec".to_string());
     }
 
     // AMD Advanced Media Framework (Linux and Windows)
@@ -668,7 +689,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             Ok("x86_64")
         )
     {
-        configure.arg("--enable-amf");
+    push_arg(&mut configure, &mut configure_args, "--enable-amf".to_string());
     }
 
     enable!(configure, "BUILD_VULKAN", "vulkan");
@@ -686,28 +707,90 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
 
     // skip all the warnings from output as they can significantly slow down the build
     // time on platforms like mac which spawns thousands of nullabilty complieance warnings
-    configure.arg("--extra-cflags=-w");
+    push_arg(&mut configure, &mut configure_args, "--extra-cflags=-w".to_string());
 
     // run ./configure
     // Request the configure script to be more verbose and print all output
     configure.env("VERBOSE", "1");
-    let output = configure
-        .output()
-        .unwrap_or_else(|_| panic!("{:?} failed", configure));
-    // Always print the configure output to make the build as verbose as possible.
-    println!(
-        "configure stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    println!(
-        "configure stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "configure failed {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+    // Print the configured invocation before running it
+    println!("cargo:warning=About to run configure: sh -x {} {}", configure_path_arg, configure_args.join(" "));
+
+    // Spawn the process and stream its stdout/stderr to the console in real time.
+    use std::process::Stdio;
+    use std::thread;
+
+    let mut child = configure
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("Failed to spawn configure: {}", e));
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    let out_clone = Arc::clone(&stdout_buf);
+    let handle_out = thread::spawn(move || {
+        let mut rdr = BufReader::new(stdout);
+        loop {
+            let mut buf = String::new();
+            match rdr.read_line(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    print!("{}", buf);
+                    io::stdout().flush().ok();
+                    out_clone.lock().unwrap().extend_from_slice(buf.as_bytes());
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let err_clone = Arc::clone(&stderr_buf);
+    let handle_err = thread::spawn(move || {
+        let mut rdr = BufReader::new(stderr);
+        loop {
+            let mut buf = String::new();
+            match rdr.read_line(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    eprint!("{}", buf);
+                    io::stderr().flush().ok();
+                    err_clone.lock().unwrap().extend_from_slice(buf.as_bytes());
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let status = child.wait().expect("Failed to wait on configure");
+    // Join reader threads
+    handle_out.join().ok();
+    handle_err.join().ok();
+
+    let output_stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
+    let output_stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+    println!("configure stdout: {}", output_stdout);
+    println!("configure stderr: {}", output_stderr);
+    if !status.success() {
+        println!("cargo:warning=configure failed (exit code: {:?})", status.code());
+        // try to print configure log if present
+        let config_log = source_dir.join("ffbuild").join("config.log");
+        if config_log.exists() {
+            println!("cargo:warning=Found ffbuild/config.log - dumping to stderr:");
+            if let Ok(contents) = fs::read_to_string(&config_log) {
+                eprintln!("--- ffbuild/config.log ---\n{}\n--- end of ffbuild/config.log ---", contents);
+            } else {
+                eprintln!("Failed to read ffbuild/config.log");
+            }
+        } else {
+            println!("cargo:warning=No ffbuild/config.log was found");
+        }
+        // Print suggestions for CI debugging
+        println!("cargo:warning=Run `cargo build -vvv` to see more logs. Also ensure you have required toolchains and environment (pkg-config/VC++/NDK) installed.");
+        return Err(io::Error::other(format!("configure failed: {}", output_stderr)));
     }
 
     // run make
