@@ -282,6 +282,25 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
 
         env::set_var("PATH", &new_path);
         env::set_var("INCLUDE", &new_include);
+
+        // Print path to cl.exe for debugging when compiling with MSVC toolchain
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            let compiler = cc::Build::new().get_compiler();
+            // Try to canonicalize for readability, fallback to raw path
+            let compiler_path = compiler
+                .path()
+                .canonicalize()
+                .unwrap_or_else(|_| compiler.path().to_path_buf());
+            if let Some(file_name) = compiler_path.file_name().and_then(|n| n.to_str()) {
+                if file_name.eq_ignore_ascii_case("cl.exe") || file_name.eq_ignore_ascii_case("cl") {
+                    println!("cargo:warning=MSVC compiler detected at {}", compiler_path.display());
+                } else {
+                    println!("cargo:warning=Compiler detected (not cl.exe) at {}", compiler_path.display());
+                }
+            } else {
+                println!("cargo:warning=Compiler detected at {}", compiler_path.display());
+            }
+        }
     }
 
     // Command's path is not relative to command's current_dir
@@ -670,19 +689,21 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     configure.arg("--extra-cflags=-w");
 
     // run ./configure
+    // Request the configure script to be more verbose and print all output
+    configure.env("VERBOSE", "1");
     let output = configure
         .output()
         .unwrap_or_else(|_| panic!("{:?} failed", configure));
+    // Always print the configure output to make the build as verbose as possible.
+    println!(
+        "configure stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    println!(
+        "configure stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     if !output.status.success() {
-        println!(
-            "configure stdout: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        println!(
-            "configure stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
         return Err(io::Error::other(format!(
             "configure failed {}",
             String::from_utf8_lossy(&output.stderr)
