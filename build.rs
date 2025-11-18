@@ -284,7 +284,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         env::set_var("INCLUDE", &new_include);
 
         // Print path to cl.exe for debugging when compiling with MSVC toolchain
-        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
             let compiler = cc::Build::new().get_compiler();
             // Try to canonicalize for readability, fallback to raw path
             let compiler_path = compiler
