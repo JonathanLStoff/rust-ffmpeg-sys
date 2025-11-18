@@ -359,7 +359,7 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
     if target != host {
-    push_arg(&mut configure, &mut configure_args, "--enable-cross-compile".to_string());
+        push_arg(&mut configure, &mut configure_args, "--enable-cross-compile".to_string());
 
         // Rust targets are subtly different than naming scheme for compiler prefixes.
         // The cc crate has the messy logic of guessing a working prefix,
@@ -373,8 +373,8 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             push_arg(&mut configure, &mut configure_args, format!("--extra-ldflags={target_flag}"));
         }
 
-    push_arg(&mut configure, &mut configure_args, format!("--arch={}", get_ffmpeg_target_arch()));
-    push_arg(&mut configure, &mut configure_args, format!("--target-os={}", get_ffmpeg_target_os()));
+        push_arg(&mut configure, &mut configure_args, format!("--arch={}", get_ffmpeg_target_arch()));
+        push_arg(&mut configure, &mut configure_args, format!("--target-os={}", get_ffmpeg_target_os()));
 
         // cross-prefix won't work for android because they use different compiler for every
         // platform version, so we provide direct compiler paths manually instead
@@ -389,8 +389,18 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             }
         }
     } else {
-        // tune the compiler for the host arhitecture
-    push_arg(&mut configure, &mut configure_args, "--extra-cflags=-march=native -mtune=native".to_string());
+        // tune the compiler for the host architecture if the compiler accepts the flags
+        let cc_local = cc::Build::new();
+        let mut march_flags: Vec<&str> = Vec::new();
+        if cc_local.is_flag_supported("-march=native").unwrap_or(false) {
+            march_flags.push("-march=native");
+        }
+        if cc_local.is_flag_supported("-mtune=native").unwrap_or(false) {
+            march_flags.push("-mtune=native");
+        }
+        if !march_flags.is_empty() {
+            push_arg(&mut configure, &mut configure_args, format!("--extra-cflags={}", march_flags.join(" ")));
+        }
     }
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
