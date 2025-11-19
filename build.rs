@@ -301,8 +301,34 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
 
         let mut configure = Command::new("sh");
         configure.arg(configure_path);
-        if cfg!(target_env = "msvc") {
-            configure.arg("--toolchain=msvc");
+        // Respect runtime target env rather than compile-time cfg. The build host
+        // Rust toolchain's `target_env` isn't the same as the Cargo target. If the
+        // target (CARGO_CFG_TARGET_ENV) is 'msvc' then the configure should use
+        // `--toolchain=msvc` unless the user explicitly provides --toolchain in
+        // FFMPEG_EXTRA_CONFIGURE_ARGS.
+        let ffmpeg_extra_args = env::var("FFMPEG_EXTRA_CONFIGURE_ARGS").unwrap_or_default();
+        let cargo_target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+        let mut selected_toolchain = String::new();
+        if cargo_target_env == "msvc" {
+            if ffmpeg_extra_args.contains("--toolchain=") {
+                println!("cargo:warning=FFMPEG_EXTRA_CONFIGURE_ARGS sets toolchain; not forcing --toolchain=msvc");
+            } else {
+                configure.arg("--toolchain=msvc");
+                selected_toolchain = "msvc".to_string();
+            }
+        }
+        // Append user extra configure args (if any). Split on whitespace; users should
+        // ensure complex args are quoted when exported so they arrive as single tokens.
+        if !ffmpeg_extra_args.trim().is_empty() {
+            println!("cargo:warning=Applying FFMPEG_EXTRA_CONFIGURE_ARGS: {}", ffmpeg_extra_args);
+            for arg in ffmpeg_extra_args.split_whitespace() {
+                configure.arg(arg);
+            }
+        }
+        if !selected_toolchain.is_empty() {
+            println!("cargo:warning=Selected toolchain for configure: {}", selected_toolchain);
+        } else if cargo_target_env != "" {
+            println!("cargo:warning=Target env is '{}', toolchain will be autodetected or controlled by FFMPEG_EXTRA_CONFIGURE_ARGS.", cargo_target_env);
         }
 
         configure
@@ -312,6 +338,17 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
 
     configure.current_dir(&source_dir);
     configure.arg(format!("--prefix={}", search().to_string_lossy()));
+
+    // Print some environment details for debugging in CI to confirm the
+    // cross-compiler and helper tools (pkg-config) are detected as expected.
+    println!("cargo:warning=Build vars: CARGO_CFG_TARGET_ENV={}, CC={}, CC_{}={}, AR={}, CROSS_COMPILE={}, PKG_CONFIG={}",
+        env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default(),
+        env::var("CC").unwrap_or_default(),
+        env::var("CARGO_CFG_TARGET_TRIPLE").unwrap_or_default(),
+        env::var(format!("CC_{}", env::var("TARGET").unwrap_or_default())).unwrap_or_default(),
+        env::var("AR").unwrap_or_default(),
+        env::var("CROSS_COMPILE").unwrap_or_default(),
+        env::var("PKG_CONFIG").unwrap_or_default());
 
     let target = env::var("TARGET").unwrap();
     let host = env::var("HOST").unwrap();
