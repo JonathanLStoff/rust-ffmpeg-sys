@@ -416,6 +416,14 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         println!("cargo:rustc-link-lib=dylib=bcrypt");
         println!("cargo:rustc-link-lib=dylib=shlwapi");
         println!("cargo:rustc-link-lib=dylib=shell32");
+
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+            // MinGW toolchains (Windows GNU) don't ship C23's <stdbit.h> yet; make
+            // sure FFmpeg's compat header is available so configure and the later
+            // build can include it without failing.
+            configure.arg("--extra-cflags=-Icompat/stdbit");
+            println!("cargo:warning=Added FFmpeg compat/stdbit include path for Windows GNU toolchain");
+        }
     }
 
     // for ios it is required to provide sysroot for both configure and bindgen
@@ -486,17 +494,17 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     } else {
         configure.arg("--disable-debug");
         configure.arg("--enable-stripping");
-        configure.arg("--extra-cflags=-03 -ffast-math -funroll-loops");
-        #[cfg(not(target_os = "windows"))]
-        configure.arg("--extra-ldflags=-flto");
+        configure.arg("--extra-cflags=-O3 -ffast-math -funroll-loops");
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+            configure.arg("--extra-ldflags=-flto");
+        }
     }
 
     // make it static
     configure.arg("--enable-static");
     configure.arg("--disable-shared");
     // windows includes threading in the standard library
-    #[cfg(not(target_env = "msvc"))]
-    {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         configure.arg("--enable-pthreads");
     }
 
