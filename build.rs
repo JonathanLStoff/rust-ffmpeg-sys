@@ -183,6 +183,48 @@ fn fetch() -> io::Result<()> {
     }
 }
 
+fn patch_ffmpeg_makefiles(source_dir: &Path) -> io::Result<()> {
+    let ffbuild_dir = source_dir.join("ffbuild");
+    let common_path = ffbuild_dir.join("common.mak");
+    let mut common_contents = fs::read_to_string(&common_path)?;
+
+    if !common_contents.contains("WRITE_RESPONSE_FILE") {
+        let helper = "\n# Write response files via GNU make to avoid Windows command line limits.\ndefine WRITE_RESPONSE_FILE\n$(file >$(1),$(strip $(foreach obj,$(2),$(obj) )))\nendef\n";
+        if let Some(insert_pos) = common_contents.find("\nifndef SUBDIR") {
+            common_contents.insert_str(insert_pos, helper);
+        } else {
+            common_contents.push_str(helper);
+        }
+        fs::write(&common_path, common_contents)?;
+    }
+
+    let library_path = ffbuild_dir.join("library.mak");
+    let mut library_contents = fs::read_to_string(&library_path)?;
+    let mut changed = false;
+
+    let replacements = [
+        ("\t$(Q)echo $^ > $@.objs", "\t$(call WRITE_RESPONSE_FILE,$@.objs,$^)")
+        ,
+        (
+            "\t$(Q)echo $$(filter %.o,$$^) > $$@.objs",
+            "\t$(call WRITE_RESPONSE_FILE,$$@.objs,$$(filter %.o,$$^))",
+        ),
+    ];
+
+    for (needle, replacement) in replacements {
+        if library_contents.contains(needle) {
+            library_contents = library_contents.replace(needle, replacement);
+            changed = true;
+        }
+    }
+
+    if changed {
+        fs::write(&library_path, library_contents)?;
+    }
+
+    Ok(())
+}
+
 fn switch(configure: &mut Command, feature: &str, name: &str) {
     let arg = if env::var("CARGO_FEATURE_".to_string() + feature).is_ok() {
         "--enable-"
@@ -269,6 +311,7 @@ fn find_sysroot() -> Option<String> {
 
 fn build(sysroot: Option<&str>) -> io::Result<()> {
     let source_dir = source();
+    patch_ffmpeg_makefiles(&source_dir)?;
     if cfg!(target_os = "windows") {
         let path = env::var("PATH").unwrap_or_default();
         let mut paths = env::split_paths(&path).collect::<Vec<_>>();
