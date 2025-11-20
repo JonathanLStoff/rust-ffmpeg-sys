@@ -203,8 +203,7 @@ fn patch_ffmpeg_makefiles(source_dir: &Path) -> io::Result<()> {
     let mut changed = false;
 
     let replacements = [
-        ("\t$(Q)echo $^ > $@.objs", "\t$(call WRITE_RESPONSE_FILE,$@.objs,$^)")
-        ,
+        ("\t$(Q)echo $^ > $@.objs", "\t$(call WRITE_RESPONSE_FILE,$@.objs,$^)"),
         (
             "\t$(Q)echo $$(filter %.o,$$^) > $$@.objs",
             "\t$(call WRITE_RESPONSE_FILE,$$@.objs,$$(filter %.o,$$^))",
