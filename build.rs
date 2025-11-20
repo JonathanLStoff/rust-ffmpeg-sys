@@ -504,7 +504,13 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
     configure.arg("--enable-static");
     configure.arg("--disable-shared");
     // windows includes threading in the standard library
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+    let disable_pthreads = env::var("FFMPEG_DISABLE_PTHREADS").is_ok();
+    if disable_pthreads {
+        configure.arg("--disable-pthreads");
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            configure.arg("--enable-w32threads");
+        }
+    } else if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         configure.arg("--enable-pthreads");
     }
 
