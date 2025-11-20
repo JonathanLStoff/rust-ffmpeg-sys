@@ -310,7 +310,9 @@ fn find_sysroot() -> Option<String> {
 
 fn build(sysroot: Option<&str>) -> io::Result<()> {
     let source_dir = source();
-    patch_ffmpeg_makefiles(&source_dir)?;
+    if cfg!(target_os = "windows") {
+        patch_ffmpeg_makefiles(&source_dir)?;
+    }
     if cfg!(target_os = "windows") {
         let path = env::var("PATH").unwrap_or_default();
         let mut paths = env::split_paths(&path).collect::<Vec<_>>();
