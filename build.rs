@@ -461,13 +461,11 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
         println!("cargo:rustc-link-lib=dylib=shlwapi");
         println!("cargo:rustc-link-lib=dylib=shell32");
 
-        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
-            // MinGW toolchains (Windows GNU) don't ship C23's <stdbit.h> yet; make
-            // sure FFmpeg's compat header is available so configure and the later
-            // build can include it without failing.
-            configure.arg("--extra-cflags=-Icompat/stdbit");
-            println!("cargo:warning=Added FFmpeg compat/stdbit include path for Windows GNU toolchain");
-        }
+        // Windows toolchains (GNU and clang-cl/MSVC) don't always ship C23's
+        // <stdbit.h>. Make sure FFmpeg's compat header is available so configure
+        // and the later build can include it without failing.
+        configure.arg("--extra-cflags=-Icompat/stdbit");
+        println!("cargo:warning=Added FFmpeg compat/stdbit include path for Windows toolchain");
 
         // Ensure Windows atomics APIs are visible to clang-cl so FFmpeg's configure
         // can satisfy the w32threads dependency on atomics_native.
