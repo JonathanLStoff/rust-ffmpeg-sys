@@ -1581,11 +1581,16 @@ fn main() {
         .iter()
         .map(|include| format!("-I{}", include.to_string_lossy()));
 
+    // Force clang to use the Cargo target triple so we pick the correct C
+    // runtime headers (MSVC vs. MinGW) and honor the user's target choice.
+    let target_triple = env::var("TARGET").unwrap_or_default();
+
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
     let mut builder = bindgen::Builder::default()
         .clang_args(clang_includes)
+        .clang_arg(format!("-target={}", target_triple))
         .ctypes_prefix("libc")
         // https://github.com/rust-lang/rust-bindgen/issues/550
         .blocklist_type("max_align_t")
@@ -1682,6 +1687,17 @@ fn main() {
         .derive_eq(true)
         .size_t_is_usize(true)
         .parse_callbacks(Box::new(Callbacks));
+
+    // When building on Windows, explicitly surface the MSVC/Windows SDK include
+    // paths (if present in the developer shell's INCLUDE env var) so clang
+    // avoids falling back to MinGW headers that can trip bindgen parsing.
+    if cfg!(target_os = "windows") {
+        if let Ok(include_var) = env::var("INCLUDE") {
+            for path in include_var.split(';').filter(|p| !p.is_empty()) {
+                builder = builder.clang_arg("-isystem").clang_arg(path);
+            }
+        }
+    }
 
     if let Some(sysroot) = sysroot.as_deref() {
         builder = builder.clang_arg(format!("--sysroot={sysroot}"));
