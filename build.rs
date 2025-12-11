@@ -468,6 +468,10 @@ fn build(sysroot: Option<&str>) -> io::Result<()> {
             configure.arg("--extra-cflags=-Icompat/stdbit");
             println!("cargo:warning=Added FFmpeg compat/stdbit include path for Windows GNU toolchain");
         }
+
+        // Ensure Windows atomics APIs are visible to clang-cl so FFmpeg's configure
+        // can satisfy the w32threads dependency on atomics_native.
+        configure.arg("--extra-cflags=-D_WIN32_WINNT=0x0601");
     }
 
     // for ios it is required to provide sysroot for both configure and bindgen
