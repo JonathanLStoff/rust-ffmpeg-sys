@@ -1590,7 +1590,7 @@ fn main() {
     // the resulting bindings.
     let mut builder = bindgen::Builder::default()
         .clang_args(clang_includes)
-        .clang_arg(format!("-target={}", target_triple))
+        .clang_arg(format!("--target={}", target_triple))
         .ctypes_prefix("libc")
         // https://github.com/rust-lang/rust-bindgen/issues/550
         .blocklist_type("max_align_t")
